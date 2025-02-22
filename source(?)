@@ -1,0 +1,259 @@
+import subprocess
+import sys
+import importlib
+
+# Function to check and install required libraries
+def check_and_install(package):
+    try:
+        importlib.import_module(package)
+    except ImportError:
+        if package == "Pillow":
+            package = "Pillow"
+        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+
+# List of required packages
+required_packages = [
+    "whisper", "tkinter", "requests", "transformers", "numpy", "soundfile", "pydub", "torch", "Pillow", "validators"
+]
+
+# Check and install required packages
+for package in required_packages:
+    check_and_install(package)
+
+import whisper
+import tkinter as tk
+from tkinter import messagebox, filedialog, ttk, Menu, Toplevel, colorchooser, font
+import requests
+from io import BytesIO
+from transformers import pipeline, BartTokenizer
+import os
+import validators
+import numpy as np
+import soundfile as sf
+from pydub import AudioSegment
+import threading
+from PIL import Image, ImageTk
+
+# Initialize Whisper model (use a smaller model if available)
+whisper_model = whisper.load_model("tiny")
+
+# Initialize the summarizer (use a smaller model if available)
+summarizer = pipeline("summarization", model="sshleifer/distilbart-cnn-12-6")
+tokenizer = BartTokenizer.from_pretrained("facebook/bart-large-cnn")
+
+def download_audio(url):
+    """Download the audio file from a URL."""
+    try:
+        response = requests.get(url)
+        response.raise_for_status()  # Check for HTTP errors
+        return BytesIO(response.content)
+    except requests.exceptions.RequestException as e:
+        messagebox.showerror("Error", f"Failed to download audio: {e}")
+        return None
+
+def convert_audio(audio, format):
+    """Convert audio to WAV format using pydub."""
+    audio.seek(0)
+    audio_segment = AudioSegment.from_file(audio, format=format)
+    wav_audio = BytesIO()
+    audio_segment.export(wav_audio, format="wav")
+    wav_audio.seek(0)
+    return wav_audio
+
+def transcribe_audio(audio_file):
+    """Transcribe the audio using Whisper."""
+    # Read the audio file from BytesIO
+    audio_data, samplerate = sf.read(audio_file)
+    # Convert to the format expected by Whisper
+    audio_array = np.array(audio_data, dtype=np.float32)
+    result = whisper_model.transcribe(audio_array)
+    return result["text"]
+
+def summarize_text(text):
+    """Summarize long text in chunks if needed."""
+    if not isinstance(text, str):
+        text = str(text)
+
+    max_chunk_size = 1024  # Maximum tokens supported
+    tokenized_text = tokenizer.encode(text, truncation=False)  # Full tokenized text
+
+    summaries = []
+    for i in range(0, len(tokenized_text), max_chunk_size):
+        chunk = tokenizer.decode(tokenized_text[i:i + max_chunk_size])  # Convert tokens back to text
+        summary = summarizer(chunk, max_length=200, min_length=50, do_sample=True)[0]['summary_text']
+        summaries.append(summary)
+
+    return " ".join(summaries)  # Combine all chunk summaries
+
+def process_audio_in_chunks(audio, chunk_size=60000):
+    """Process the audio in chunks to avoid memory issues."""
+    audio.seek(0)
+    audio_segment = AudioSegment.from_file(audio)
+    chunks = [audio_segment[i:i + chunk_size] for i in range(0, len(audio_segment), chunk_size)]
+    transcript = ""
+    total_chunks = len(chunks)
+    for i, chunk in enumerate(chunks):
+        wav_audio = BytesIO()
+        chunk.export(wav_audio, format="wav")
+        wav_audio.seek(0)
+        transcript += transcribe_audio(wav_audio) + " "
+        # Update progress bar
+        progress = int((i + 1) / total_chunks * 100)
+        progress_var.set(progress)
+        update_progress_circle(progress)
+        root.update_idletasks()
+    return transcript
+
+def on_summarize_button_click():
+    """Handle button click to process the audio and show the summary."""
+    path = url_entry.get()
+    print(f"Path entered: {path}")  # Debugging statement
+    if not path:
+        messagebox.showwarning("Input Error", "Please enter a URL or select a file.")
+        return
+
+    # Check if the path is a valid URL
+    if validators.url(path):
+        print("Valid URL detected")  # Debugging statement
+        audio = download_audio(path)
+        format = path.split('.')[-1]
+    elif os.path.isfile(path):
+        print("Valid file path detected")  # Debugging statement
+        with open(path, 'rb') as f:
+            audio = BytesIO(f.read())
+        format = path.split('.')[-1]
+    else:
+        messagebox.showerror("Input Error", "Invalid URL or file path.")
+        return
+
+    if audio:
+        # Convert audio to WAV format if necessary
+        if format in ['mp4', 'm4a']:
+            audio = convert_audio(audio, format)
+        # Process the audio in chunks to avoid memory issues
+        threading.Thread(target=process_and_summarize_audio, args=(audio,)).start()
+
+def process_and_summarize_audio(audio):
+    """Process and summarize the audio in a separate thread."""
+    transcript = process_audio_in_chunks(audio)
+    summary = summarize_text(transcript)
+
+    # Update the text box with the summary
+    result_text.delete(1.0, tk.END)  # Clear previous text
+    result_text.insert(tk.END, summary)  # Insert the new summary
+
+def on_browse_button_click():
+    """Handle the browse button click to select a file."""
+    file_path = filedialog.askopenfilename(filetypes=[("Audio Files", "*.mp4;*.m4a;*.wav")])
+    if file_path:
+        url_entry.delete(0, tk.END)  # Clear the current text in the entry
+        url_entry.insert(0, file_path)  # Insert the selected file path
+
+def on_update_button_click():
+    """Handle the update button click to update the script."""
+    # Perform the update without using a GIF
+    def perform_update():
+        python = sys.executable
+        os.execl(python, python, *sys.argv)
+
+    threading.Thread(target=perform_update).start()
+
+def on_edit_button_click():
+    """Handle the edit button click to open the customization menu."""
+    edit_window = Toplevel(root)
+    edit_window.title("Edit Settings")
+
+    def change_bg_color():
+        color = colorchooser.askcolor()[1]
+        if color:
+            root.configure(bg=color)
+
+    def change_font():
+        font_choice = font.askfont(root)
+        if font_choice:
+            new_font = (font_choice['family'], font_choice['size'], font_choice['weight'])
+            header_label.config(font=new_font)
+            url_label.config(font=new_font)
+            progress_label.config(font=new_font)
+            result_text.config(font=new_font)
+
+    tk.Button(edit_window, text="Change Background Color", command=change_bg_color).pack(pady=5)
+    tk.Button(edit_window, text="Change Font", command=change_font).pack(pady=5)
+
+def on_reset_button_click():
+    """Handle the reset button click to reset the progress bar, clear the transcript window, and allow new audio input."""
+    progress_var.set(0)
+    update_progress_circle(0)
+    result_text.delete(1.0, tk.END)  # Clear the transcript window
+    url_entry.delete(0, tk.END)  # Clear the URL entry
+
+# Set up the main window
+root = tk.Tk()
+root.title("Audio to Summary App")
+root.configure(bg="#001f3f")  # Set background color to dark blue
+
+# Configure grid to make widgets resizable
+root.grid_rowconfigure(0, weight=1)
+root.grid_rowconfigure(1, weight=1)
+root.grid_rowconfigure(2, weight=1)
+root.grid_rowconfigure(3, weight=1)
+root.grid_rowconfigure(4, weight=1)
+root.grid_rowconfigure(5, weight=1)
+root.grid_columnconfigure(0, weight=1)
+root.grid_columnconfigure(1, weight=1)
+
+# Set up the header
+header_label = tk.Label(root, text="sten-aug-graph-fy", bg="#001f3f", fg="#ffffff", font=("Arial", 16, "bold"))
+header_label.grid(row=0, column=0, columnspan=2, padx=10, pady=10, sticky="nsew")
+
+# Change the label text
+url_label = tk.Label(root, text="Enter Audio:", bg="#001f3f", fg="#ffffff", font=("Arial", 12))
+url_label.grid(row=1, column=0, padx=10, pady=5, sticky="w")
+
+url_entry = tk.Entry(root, width=50, bg="#003366", fg="#ffffff", font=("Arial", 10))
+url_entry.grid(row=2, column=0, padx=10, pady=5, sticky="ew")
+
+# Set up the Browse button
+browse_button = tk.Button(root, text="Browse...", command=on_browse_button_click, bg="#FFFF00", fg="#000000", font=("Arial", 10, "italic"), relief="solid", borderwidth=1)
+browse_button.grid(row=2, column=1, padx=10, pady=5, sticky="ew")
+
+# Set up the Summarize button
+summarize_button = tk.Button(root, text="Summarize Audio", command=on_summarize_button_click, bg="#FF0000", fg="#000000", font=("Arial", 12, "bold"), relief="solid", borderwidth=1)
+summarize_button.grid(row=3, column=0, padx=10, pady=10, sticky="ew")
+
+# Set up the Reset button
+reset_button = tk.Button(root, text="Reset", command=on_reset_button_click, bg="#FF0000", fg="#000000", font=("Arial", 12, "bold"), relief="solid", borderwidth=1)
+reset_button.grid(row=3, column=1, padx=10, pady=10, sticky="ew")
+
+# Set up the progress bar
+progress_var = tk.IntVar()
+progress_canvas = tk.Canvas(root, width=100, height=100, bg="#001f3f", highlightthickness=0)
+progress_canvas.grid(row=4, column=0, columnspan=2, padx=10, pady=10, sticky="nsew")
+
+# Set up the progress label
+progress_label = tk.Label(root, text="0%", bg="#001f3f", fg="#ffffff", font=("Arial", 10))
+progress_label.place(x=50, y=50, anchor="center")
+
+def update_progress_circle(progress):
+    progress_canvas.delete("all")
+    progress_canvas.create_oval(10, 10, 90, 90, outline="#ffffff", width=2)
+    progress_canvas.create_arc(10, 10, 90, 90, start=90, extent=-3.6 * progress, outline="#00ff00", width=8, style="arc")
+    progress_label.config(text=f"{progress}%")
+    progress_label.place(x=50, y=50, anchor="center")
+
+# Set up the result display
+result_text = tk.Text(root, width=80, height=10, bg="#003366", fg="#ffffff", font=("Arial", 10))
+result_text.grid(row=5, column=0, columnspan=2, padx=10, pady=10, sticky="nsew")
+
+# Set up the menu bar
+menu_bar = Menu(root)
+root.config(menu=menu_bar)
+
+# Add the "Menu" menu
+file_menu = Menu(menu_bar, tearoff=0)
+menu_bar.add_cascade(label="Menu", menu=file_menu)
+file_menu.add_command(label="Update", command=on_update_button_click)
+file_menu.add_command(label="Edit", command=on_edit_button_click)
+
+# Run the app
+root.mainloop()
